@@ -1,7 +1,5 @@
 [build]
-builder = "nixpacks"
-nixpacksConfigPath = "nixpacks.toml"
+builder = "dockerfile"
 
 [deploy]
-startCommand = "playwright install chromium && playwright install-deps && python monitor.py"
 restartPolicyType = "always"
