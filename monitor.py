@@ -7,7 +7,6 @@ from pathlib import Path
 from datetime import datetime
 
 PAGE_URL = "https://roofz.eu/availability"
-# Use /app directory which persists, or environment variable
 STATE_FILE = os.environ.get("STATE_FILE", "/app/roofz_listings.json")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
 TIMEOUT = 60
@@ -29,7 +28,9 @@ def get_listings():
     resp.raise_for_status()
     html = resp.text
     
-    listing_ids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', html))
+    # ONLY match UUIDs that appear in /listing/ URLs
+    listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
+    
     return {lid: {"id": lid} for lid in listing_ids}
 
 
@@ -68,12 +69,12 @@ def check_for_new():
 
     new_ids = current_ids - previous_ids
 
-    # Only alert if we had previous state AND found few new ones (avoid restart spam)
-    if new_ids and previous_ids and len(new_ids) <= 10:
+    # Only alert if small number of new listings (avoid restart false positives)
+    if new_ids and previous_ids and len(new_ids) <= 5:
         log(f"NEW LISTINGS: {len(new_ids)}")
         send_email(new_ids)
-    elif new_ids and len(new_ids) > 10:
-        log(f"Skipping alert - too many 'new' listings ({len(new_ids)}), likely a restart")
+    elif new_ids and len(new_ids) > 5:
+        log(f"Skipping alert - {len(new_ids)} 'new' (likely restart)")
     elif not previous_ids:
         log(f"First run - tracking {len(current_ids)} listings")
     else:
