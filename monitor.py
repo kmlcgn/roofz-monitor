@@ -17,7 +17,6 @@ def get_listings():
     from playwright.sync_api import sync_playwright
     
     listings = {}
-    api_data = []
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -26,69 +25,24 @@ def get_listings():
         )
         page = context.new_page()
         
-        def handle_response(response):
-            url = response.url
-            if "api" in url and "propert" in url.lower():
-                log(f"API Response: {url[:80]}")
-                try:
-                    data = response.json()
-                    if "data" in data:
-                        api_data.append(data)
-                        log(f"Got {len(data.get('data', []))} items from API")
-                except:
-                    pass
-        
-        page.on("response", handle_response)
-        
         log("Loading page...")
         page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(5000)
         
         html = page.content()
         
-        # Find ALL UUIDs in the page
-        all_uuids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', html))
-        log(f"Total UUIDs found: {len(all_uuids)}")
+        # Use the property pattern that found 11 matches
+        property_uuids = set(re.findall(
+            r'property[^>]*?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
+            html,
+            re.IGNORECASE
+        ))
         
-        # Look for property-related content
-        property_patterns = [
-            r'"id":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"',  # JSON id
-            r'property[^>]*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',  # property class/attr
-            r'data-id="([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"',  # data-id
-        ]
-        
-        for pattern in property_patterns:
-            matches = set(re.findall(pattern, html))
-            if matches:
-                log(f"Pattern '{pattern[:30]}...' found {len(matches)} matches")
-        
-        # Check for __NUXT__ data
-        nuxt_match = re.search(r'window\.__NUXT__\s*=\s*(.+?);</script>', html, re.DOTALL)
-        if nuxt_match:
-            nuxt_data = nuxt_match.group(1)
-            nuxt_uuids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', nuxt_data))
-            log(f"UUIDs in __NUXT__: {len(nuxt_uuids)}")
-            # Log a sample
-            if nuxt_uuids:
-                sample = list(nuxt_uuids)[:3]
-                log(f"Sample UUIDs: {sample}")
+        log(f"Found {len(property_uuids)} property UUIDs")
         
         browser.close()
-    
-    # Use API data if available
-    for data in api_data:
-        for item in data.get("data", []):
-            lid = item.get("id")
-            if lid:
-                listings[lid] = {"id": lid}
-    
-    # Use NUXT UUIDs as fallback (filter to reasonable count)
-    if not listings and nuxt_match:
-        nuxt_data = nuxt_match.group(1)
-        # Look for IDs that appear near "available" or "property" context
-        context_uuids = set(re.findall(r'"id":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"', nuxt_data))
-        log(f"Context UUIDs: {len(context_uuids)}")
-        listings = {lid: {"id": lid} for lid in context_uuids}
+        
+        listings = {lid: {"id": lid} for lid in property_uuids}
     
     return listings
 
@@ -120,7 +74,7 @@ def check_for_new():
     current_ids = set(current.keys())
     state_path = Path(STATE_FILE)
 
-    log(f"Found {len(current_ids)} listings")
+    log(f"Tracking {len(current_ids)} listings")
 
     previous_ids = set()
     if state_path.exists():
@@ -128,11 +82,9 @@ def check_for_new():
 
     new_ids = current_ids - previous_ids
 
-    if new_ids and previous_ids and len(new_ids) <= 5:
+    if new_ids and previous_ids:
         log(f"NEW LISTINGS: {len(new_ids)}")
         send_email(new_ids)
-    elif new_ids and len(new_ids) > 5:
-        log(f"Skipping alert - {len(new_ids)} 'new' (likely restart)")
     elif not previous_ids:
         log(f"First run - tracking {len(current_ids)} listings")
     else:
