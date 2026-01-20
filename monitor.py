@@ -24,34 +24,54 @@ def get_listings():
         page = browser.new_page()
         
         def handle_response(response):
-            if "/api/properties" in response.url:
+            url = response.url
+            if "properties" in url or "listing" in url.lower():
+                log(f"Response: {url[:100]}")
                 try:
                     data = response.json()
-                    api_data.append(data)
-                    log(f"Intercepted API: {len(data.get('data', []))} listings")
+                    if "data" in data:
+                        api_data.append(data)
+                        log(f"Got API data: {len(data.get('data', []))} items")
                 except:
                     pass
         
         page.on("response", handle_response)
         
-        page.goto("https://roofz.eu/availability", timeout=60000)
-        page.wait_for_timeout(5000)
+        log("Loading page...")
+        page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
         
-        # Get HTML before closing browser
+        log("Waiting for content...")
+        page.wait_for_timeout(8000)
+        
+        # Try scrolling to trigger lazy loading
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(3000)
+        
         html = page.content()
+        
+        # Debug: log HTML snippet
+        log(f"HTML length: {len(html)}")
+        if "listing" in html.lower():
+            log("Found 'listing' in HTML")
+        else:
+            log("No 'listing' found in HTML")
+        
+        # Debug: find all hrefs
+        hrefs = re.findall(r'href="([^"]*)"', html)
+        listing_hrefs = [h for h in hrefs if 'listing' in h.lower()]
+        log(f"Found {len(listing_hrefs)} listing hrefs: {listing_hrefs[:5]}")
         
         browser.close()
     
-    # Use intercepted API data if available
+    # Use intercepted API data
     for data in api_data:
         for item in data.get("data", []):
             lid = item.get("id")
             if lid:
                 listings[lid] = {"id": lid}
     
-    # Fallback: parse HTML if no API data
+    # Fallback: parse HTML
     if not listings:
-        log("No API data, parsing HTML")
         listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
         listings = {lid: {"id": lid} for lid in listing_ids}
     
