@@ -1,34 +1,33 @@
-import requests
 import json
 import os
 import re
 import time
 from pathlib import Path
 from datetime import datetime
+import requests
 
-PAGE_URL = "https://roofz.eu/availability"
 STATE_FILE = os.environ.get("STATE_FILE", "/app/roofz_listings.json")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
-TIMEOUT = 60
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,nl;q=0.8",
-}
-
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
 def get_listings():
-    session = requests.Session()
-    resp = session.get(PAGE_URL, headers=HEADERS, timeout=TIMEOUT)
-    resp.raise_for_status()
-    html = resp.text
+    from playwright.sync_api import sync_playwright
     
-    # ONLY match UUIDs that appear in /listing/ URLs
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
+        
+        # Wait for listings to load
+        page.wait_for_timeout(3000)
+        
+        html = page.content()
+        browser.close()
+    
+    # Extract listing IDs from /listing/ URLs
     listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
     
     return {lid: {"id": lid} for lid in listing_ids}
@@ -69,7 +68,6 @@ def check_for_new():
 
     new_ids = current_ids - previous_ids
 
-    # Only alert if small number of new listings (avoid restart false positives)
     if new_ids and previous_ids and len(new_ids) <= 5:
         log(f"NEW LISTINGS: {len(new_ids)}")
         send_email(new_ids)
