@@ -6,7 +6,8 @@ from pathlib import Path
 from datetime import datetime
 import requests
 
-STATE_FILE = os.environ.get("STATE_FILE", "/app/roofz_listings.json")
+# Use Railway volume for persistent storage
+STATE_FILE = os.environ.get("STATE_FILE", "/data/roofz_listings.json")
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
 
 def log(msg):
@@ -29,27 +30,78 @@ def get_listings():
         page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(5000)
         
-        html = page.content()
+        # Get listing cards by finding clickable property elements
+        # and extracting their href or data attributes
+        listing_links = page.evaluate('''() => {
+            const links = [];
+            // Find all anchor tags that link to /listing/
+            document.querySelectorAll('a[href*="/listing/"]').forEach(el => {
+                const href = el.getAttribute('href');
+                const match = href.match(/\\/listing\\/([a-f0-9-]{36})/);
+                if (match) links.push(match[1]);
+            });
+            return [...new Set(links)];  // Unique only
+        }''')
         
-        # Use the property pattern that found 11 matches
-        property_uuids = set(re.findall(
-            r'property[^>]*?([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',
-            html,
-            re.IGNORECASE
-        ))
+        log(f"Found {len(listing_links)} listing links via JS")
         
-        log(f"Found {len(property_uuids)} property UUIDs")
+        # If no links found, try nuxt-link elements
+        if not listing_links:
+            listing_links = page.evaluate('''() => {
+                const links = [];
+                // Nuxt uses nuxt-link which renders as <a>
+                document.querySelectorAll('[href*="listing"]').forEach(el => {
+                    const href = el.getAttribute('href') || el.getAttribute('to');
+                    if (href) {
+                        const match = href.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/);
+                        if (match) links.push(match[1]);
+                    }
+                });
+                return [...new Set(links)];
+            }''')
+            log(f"Found {len(listing_links)} via nuxt-link")
+        
+        # Fallback: look for property cards
+        if not listing_links:
+            listing_links = page.evaluate('''() => {
+                const links = [];
+                // Look for cards with click handlers or data attributes
+                document.querySelectorAll('[class*="property"], [class*="listing"], [class*="card"]').forEach(el => {
+                    const text = el.outerHTML;
+                    const matches = text.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g);
+                    if (matches) {
+                        // Only take first UUID per card (likely the ID)
+                        links.push(matches[0]);
+                    }
+                });
+                return [...new Set(links)];
+            }''')
+            log(f"Found {len(listing_links)} via property cards")
         
         browser.close()
         
-        listings = {lid: {"id": lid} for lid in property_uuids}
+        listings = {lid: {"id": lid} for lid in listing_links}
     
     return listings
 
 
 def send_email(new_listings):
-    body = f"{len(new_listings)} new listing(s) on Roofz.eu!\n\n"
-    for lid in new_listings:
+    # Verify listings exist before sending
+    valid_listings = []
+    for lid in list(new_listings)[:5]:  # Check first 5
+        try:
+            resp = requests.head(f"https://roofz.eu/listing/{lid}", timeout=10, allow_redirects=True)
+            if resp.status_code == 200:
+                valid_listings.append(lid)
+        except:
+            pass
+    
+    if not valid_listings:
+        log("No valid listings found, skipping email")
+        return
+    
+    body = f"{len(valid_listings)} new listing(s) on Roofz.eu!\n\n"
+    for lid in valid_listings:
         body += f"* https://roofz.eu/listing/{lid}\n\n"
     body += "View all: https://roofz.eu/availability"
 
@@ -59,7 +111,7 @@ def send_email(new_listings):
         json={
             "from": "Roofz Monitor <onboarding@resend.dev>",
             "to": os.environ["EMAIL_TO"],
-            "subject": f"Roofz: {len(new_listings)} New Listing(s)!",
+            "subject": f"Roofz: {len(valid_listings)} New Listing(s)!",
             "text": body,
         },
     )
@@ -72,9 +124,12 @@ def send_email(new_listings):
 def check_for_new():
     current = get_listings()
     current_ids = set(current.keys())
+    
+    # Ensure data directory exists
+    Path("/data").mkdir(exist_ok=True)
     state_path = Path(STATE_FILE)
 
-    log(f"Tracking {len(current_ids)} listings")
+    log(f"Found {len(current_ids)} listings")
 
     previous_ids = set()
     if state_path.exists():
@@ -83,7 +138,7 @@ def check_for_new():
     new_ids = current_ids - previous_ids
 
     if new_ids and previous_ids:
-        log(f"NEW LISTINGS: {len(new_ids)}")
+        log(f"Potential new listings: {len(new_ids)}")
         send_email(new_ids)
     elif not previous_ids:
         log(f"First run - tracking {len(current_ids)} listings")
