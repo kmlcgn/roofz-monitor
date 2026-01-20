@@ -17,13 +17,11 @@ def get_listings():
     from playwright.sync_api import sync_playwright
     
     listings = {}
+    api_data = []
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        
-        # Intercept API responses to get listing data directly
-        api_data = []
         
         def handle_response(response):
             if "/api/properties" in response.url:
@@ -37,25 +35,25 @@ def get_listings():
         page.on("response", handle_response)
         
         page.goto("https://roofz.eu/availability", timeout=60000)
-        
-        # Wait for listings to load
         page.wait_for_timeout(5000)
         
+        # Get HTML before closing browser
+        html = page.content()
+        
         browser.close()
-        
-        # Use intercepted API data if available
-        for data in api_data:
-            for item in data.get("data", []):
-                lid = item.get("id")
-                if lid:
-                    listings[lid] = {"id": lid}
-        
-        # Fallback: parse HTML if no API data
-        if not listings:
-            log("No API data intercepted, trying HTML parse")
-            html = page.content() if page else ""
-            listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
-            listings = {lid: {"id": lid} for lid in listing_ids}
+    
+    # Use intercepted API data if available
+    for data in api_data:
+        for item in data.get("data", []):
+            lid = item.get("id")
+            if lid:
+                listings[lid] = {"id": lid}
+    
+    # Fallback: parse HTML if no API data
+    if not listings:
+        log("No API data, parsing HTML")
+        listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
+        listings = {lid: {"id": lid} for lid in listing_ids}
     
     return listings
 
