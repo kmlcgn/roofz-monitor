@@ -1,9 +1,7 @@
 import requests
 import json
-import smtplib
 import os
 import time
-from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
@@ -40,15 +38,21 @@ def send_email(new_listings):
         body += f"  {info['city']} | {info['bedrooms']} bed | {info['surface']}m2\n"
         body += f"  https://roofz.eu/listing/{lid}\n\n"
 
-    msg = MIMEText(body)
-    msg["Subject"] = f"Roofz: {len(new_listings)} New Listing(s)!"
-    msg["From"] = os.environ["EMAIL_FROM"]
-    msg["To"] = os.environ["EMAIL_TO"]
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(os.environ["EMAIL_FROM"], os.environ["EMAIL_PASSWORD"])
-        server.sendmail(os.environ["EMAIL_FROM"], os.environ["EMAIL_TO"], msg.as_string())
-    log(f"Email sent for {len(new_listings)} new listing(s)")
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"},
+        json={
+            "from": "Roofz Monitor <onboarding@resend.dev>",
+            "to": os.environ["EMAIL_TO"],
+            "subject": f"Roofz: {len(new_listings)} New Listing(s)!",
+            "text": body,
+        },
+    )
+    
+    if resp.status_code == 200:
+        log(f"Email sent for {len(new_listings)} new listing(s)")
+    else:
+        log(f"Email failed: {resp.text}")
 
 
 def check_for_new():
