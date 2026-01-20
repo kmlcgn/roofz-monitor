@@ -21,17 +21,20 @@ def get_listings():
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
         
         def handle_response(response):
             url = response.url
-            if "properties" in url or "listing" in url.lower():
-                log(f"Response: {url[:100]}")
+            if "api" in url and "propert" in url.lower():
+                log(f"API Response: {url[:80]}")
                 try:
                     data = response.json()
                     if "data" in data:
                         api_data.append(data)
-                        log(f"Got API data: {len(data.get('data', []))} items")
+                        log(f"Got {len(data.get('data', []))} items from API")
                 except:
                     pass
         
@@ -39,41 +42,53 @@ def get_listings():
         
         log("Loading page...")
         page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
-        
-        log("Waiting for content...")
-        page.wait_for_timeout(8000)
-        
-        # Try scrolling to trigger lazy loading
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(5000)
         
         html = page.content()
         
-        # Debug: log HTML snippet
-        log(f"HTML length: {len(html)}")
-        if "listing" in html.lower():
-            log("Found 'listing' in HTML")
-        else:
-            log("No 'listing' found in HTML")
+        # Find ALL UUIDs in the page
+        all_uuids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', html))
+        log(f"Total UUIDs found: {len(all_uuids)}")
         
-        # Debug: find all hrefs
-        hrefs = re.findall(r'href="([^"]*)"', html)
-        listing_hrefs = [h for h in hrefs if 'listing' in h.lower()]
-        log(f"Found {len(listing_hrefs)} listing hrefs: {listing_hrefs[:5]}")
+        # Look for property-related content
+        property_patterns = [
+            r'"id":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"',  # JSON id
+            r'property[^>]*([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})',  # property class/attr
+            r'data-id="([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"',  # data-id
+        ]
+        
+        for pattern in property_patterns:
+            matches = set(re.findall(pattern, html))
+            if matches:
+                log(f"Pattern '{pattern[:30]}...' found {len(matches)} matches")
+        
+        # Check for __NUXT__ data
+        nuxt_match = re.search(r'window\.__NUXT__\s*=\s*(.+?);</script>', html, re.DOTALL)
+        if nuxt_match:
+            nuxt_data = nuxt_match.group(1)
+            nuxt_uuids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', nuxt_data))
+            log(f"UUIDs in __NUXT__: {len(nuxt_uuids)}")
+            # Log a sample
+            if nuxt_uuids:
+                sample = list(nuxt_uuids)[:3]
+                log(f"Sample UUIDs: {sample}")
         
         browser.close()
     
-    # Use intercepted API data
+    # Use API data if available
     for data in api_data:
         for item in data.get("data", []):
             lid = item.get("id")
             if lid:
                 listings[lid] = {"id": lid}
     
-    # Fallback: parse HTML
-    if not listings:
-        listing_ids = set(re.findall(r'/listing/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', html))
-        listings = {lid: {"id": lid} for lid in listing_ids}
+    # Use NUXT UUIDs as fallback (filter to reasonable count)
+    if not listings and nuxt_match:
+        nuxt_data = nuxt_match.group(1)
+        # Look for IDs that appear near "available" or "property" context
+        context_uuids = set(re.findall(r'"id":"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"', nuxt_data))
+        log(f"Context UUIDs: {len(context_uuids)}")
+        listings = {lid: {"id": lid} for lid in context_uuids}
     
     return listings
 
