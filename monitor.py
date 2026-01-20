@@ -5,9 +5,15 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-API_URL = "https://roofz.eu/api/properties?filter[status]=available&sort=-created_at&page[number]=1&page[size]=100"
+API_URL = "https://roofz.eu/api/properties"
 STATE_FILE = "/tmp/roofz_listings.json"
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 30))
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Referer": "https://roofz.eu/availability",
+}
 
 
 def log(msg):
@@ -15,7 +21,13 @@ def log(msg):
 
 
 def get_listings():
-    resp = requests.get(API_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+    params = {
+        "filter[status]": "available",
+        "sort": "-created_at",
+        "page[number]": 1,
+        "page[size]": 100,
+    }
+    resp = requests.get(API_URL, headers=HEADERS, params=params, timeout=30)
     resp.raise_for_status()
     listings = {}
     for item in resp.json().get("data", []):
@@ -48,7 +60,7 @@ def send_email(new_listings):
             "text": body,
         },
     )
-    
+
     if resp.status_code == 200:
         log(f"Email sent for {len(new_listings)} new listing(s)")
     else:
