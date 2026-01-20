@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python monitor.py"
+startCommand = "python test_email.py"
 restartPolicyType = "always"
