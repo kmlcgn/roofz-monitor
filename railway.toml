@@ -1,8 +1,6 @@
 [build]
 builder = "nixpacks"
-
-[build.nixpacksConfigPath]
-configPath = "nixpacks.toml"
+nixpacksConfigPath = "nixpacks.toml"
 
 [deploy]
 startCommand = "playwright install chromium && playwright install-deps && python monitor.py"
