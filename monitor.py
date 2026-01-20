@@ -7,13 +7,16 @@ from pathlib import Path
 from datetime import datetime
 
 PAGE_URL = "https://roofz.eu/availability"
+API_URL = "https://roofz.eu/api/properties"
 STATE_FILE = "/tmp/roofz_listings.json"
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 30))
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://roofz.eu/availability",
+    "Origin": "https://roofz.eu",
 }
 
 
@@ -22,25 +25,58 @@ def log(msg):
 
 
 def get_listings():
-    resp = requests.get(PAGE_URL, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    html = resp.text
+    session = requests.Session()
     
-    # Extract listing IDs from the HTML (they appear as /listing/UUID links)
-    listing_ids = set(re.findall(r'/listing/([a-f0-9-]{36})', html))
+    # First visit the page to get cookies
+    session.get(PAGE_URL, headers={
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }, timeout=30)
     
-    # Try to extract listing details from __NUXT__ state
+    # Now try the API with the session cookies
+    params = {
+        "filter[status]": "available",
+        "sort": "-created_at",
+        "page[number]": 1,
+        "page[size]": 100,
+    }
+    
+    resp = session.get(API_URL, headers=HEADERS, params=params, timeout=30)
+    
     listings = {}
-    for lid in listing_ids:
-        listings[lid] = {"id": lid}
     
-    # Try to get more details from the page
-    # Match title patterns near listing IDs
-    for lid in listing_ids:
-        # Look for title in nearby content
-        title_match = re.search(rf'title["\s:]+([^"<>]+)["\s<].*?{lid}|{lid}.*?title["\s:]+([^"<>]+)', html, re.IGNORECASE | re.DOTALL)
-        if title_match:
-            listings[lid]["title"] = title_match.group(1) or title_match.group(2)
+    # Check if we got JSON
+    try:
+        data = resp.json()
+        for item in data.get("data", []):
+            lid = item["id"]
+            attrs = item.get("attributes", {})
+            listings[lid] = {
+                "title": attrs.get("title", ""),
+                "price": attrs.get("price", 0),
+                "city": attrs.get("city", ""),
+                "bedrooms": attrs.get("bedrooms", 0),
+                "surface": attrs.get("surface", 0),
+            }
+        log(f"API returned {len(listings)} listings")
+    except:
+        # API blocked, try parsing HTML for listing IDs
+        log("API blocked, falling back to HTML parsing")
+        html = session.get(PAGE_URL, headers=HEADERS, timeout=30).text
+        
+        # Look for listing UUIDs in href attributes
+        listing_ids = set(re.findall(r'href="[^"]*?/listing/([a-f0-9-]{36})"', html))
+        
+        if not listing_ids:
+            # Try __NUXT__ state
+            nuxt_match = re.search(r'window\.__NUXT__\s*=\s*(.+?);</script>', html, re.DOTALL)
+            if nuxt_match:
+                listing_ids = set(re.findall(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', nuxt_match.group(1)))
+        
+        for lid in listing_ids:
+            listings[lid] = {"id": lid, "title": "New listing"}
+        
+        log(f"HTML parsing found {len(listings)} listings")
     
     return listings
 
@@ -48,9 +84,18 @@ def get_listings():
 def send_email(new_listings):
     body = f"{len(new_listings)} new listing(s) on Roofz.eu!\n\n"
     for lid, info in new_listings.items():
-        title = info.get("title", "New Property")
-        body += f"* {title}\n"
+        title = info.get("title") or "New Property"
+        price = info.get("price", "")
+        city = info.get("city", "")
+        
+        body += f"* {title}"
+        if price:
+            body += f" - EUR {price}/mo"
+        body += "\n"
+        if city:
+            body += f"  {city}\n"
         body += f"  https://roofz.eu/listing/{lid}\n\n"
+    
     body += "View all: https://roofz.eu/availability"
 
     resp = requests.post(
@@ -65,7 +110,7 @@ def send_email(new_listings):
     )
 
     if resp.status_code == 200:
-        log(f"Email sent for {len(new_listings)} new listing(s)")
+        log(f"Email sent!")
     else:
         log(f"Email failed: {resp.text}")
 
@@ -75,7 +120,9 @@ def check_for_new():
     current_ids = set(current.keys())
     state_path = Path(STATE_FILE)
 
-    log(f"Found {len(current_ids)} listings on page")
+    if not current_ids:
+        log("WARNING: No listings found - site may be blocking requests")
+        return
 
     previous_ids = set()
     if state_path.exists():
@@ -88,16 +135,15 @@ def check_for_new():
         new_listings = {lid: current[lid] for lid in new_ids}
         send_email(new_listings)
     elif not previous_ids:
-        log(f"First run - now tracking {len(current_ids)} listings")
+        log(f"First run - tracking {len(current_ids)} listings")
     else:
-        log(f"No new listings")
+        log(f"No new listings (tracking {len(current_ids)})")
 
     state_path.write_text(json.dumps(list(current_ids)))
 
 
 def main():
-    log(f"Starting Roofz monitor (checking every {CHECK_INTERVAL}s)")
-    log(f"Scraping: {PAGE_URL}")
+    log(f"Starting Roofz monitor (every {CHECK_INTERVAL}s)")
     while True:
         try:
             check_for_new()
