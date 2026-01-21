@@ -1,14 +1,14 @@
 import json
 import os
-import re
 import time
 from pathlib import Path
 from datetime import datetime
 import requests
 
-# Use Railway volume for persistent storage
 STATE_FILE = os.environ.get("STATE_FILE", "/data/roofz_listings.json")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))
+API_URL = "https://roofz.eu/api/properties?filter[status]=available&sort=-created_at&page[number]=1&page[size]=100"
+
 
 def log(msg):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -19,106 +19,93 @@ def get_listings():
     
     listings = {}
     
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+            
+            # Load page to get session/cookies
+            log("Loading page...")
+            page.goto("https://roofz.eu/availability", wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(3000)
+            
+            # Get cookies
+            cookies = context.cookies()
+            cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+            
+            browser.close()
         
-        log("Loading page...")
-        page.goto("https://roofz.eu/availability", wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(5000)
+        # Call API directly with session cookies
+        log("Calling API...")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://roofz.eu/availability",
+            "Cookie": cookie_str,
+        }
         
-        # Get listing cards by finding clickable property elements
-        # and extracting their href or data attributes
-        listing_links = page.evaluate('''() => {
-            const links = [];
-            // Find all anchor tags that link to /listing/
-            document.querySelectorAll('a[href*="/listing/"]').forEach(el => {
-                const href = el.getAttribute('href');
-                const match = href.match(/\\/listing\\/([a-f0-9-]{36})/);
-                if (match) links.push(match[1]);
-            });
-            return [...new Set(links)];  // Unique only
-        }''')
+        resp = requests.get(API_URL, headers=headers, timeout=30)
         
-        log(f"Found {len(listing_links)} listing links via JS")
-        
-        # If no links found, try nuxt-link elements
-        if not listing_links:
-            listing_links = page.evaluate('''() => {
-                const links = [];
-                // Nuxt uses nuxt-link which renders as <a>
-                document.querySelectorAll('[href*="listing"]').forEach(el => {
-                    const href = el.getAttribute('href') || el.getAttribute('to');
-                    if (href) {
-                        const match = href.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/);
-                        if (match) links.push(match[1]);
-                    }
-                });
-                return [...new Set(links)];
-            }''')
-            log(f"Found {len(listing_links)} via nuxt-link")
-        
-        # Fallback: look for property cards
-        if not listing_links:
-            listing_links = page.evaluate('''() => {
-                const links = [];
-                // Look for cards with click handlers or data attributes
-                document.querySelectorAll('[class*="property"], [class*="listing"], [class*="card"]').forEach(el => {
-                    const text = el.outerHTML;
-                    const matches = text.match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/g);
-                    if (matches) {
-                        // Only take first UUID per card (likely the ID)
-                        links.push(matches[0]);
-                    }
-                });
-                return [...new Set(links)];
-            }''')
-            log(f"Found {len(listing_links)} via property cards")
-        
-        browser.close()
-        
-        listings = {lid: {"id": lid} for lid in listing_links}
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                for item in data.get("data", []):
+                    lid = item.get("id")
+                    if lid:
+                        attrs = item.get("attributes", {})
+                        listings[lid] = {
+                            "id": lid,
+                            "title": attrs.get("title", "New listing"),
+                            "price": attrs.get("price", 0),
+                            "city": attrs.get("city", ""),
+                        }
+                log(f"API returned {len(listings)} listings")
+            except Exception as e:
+                log(f"Failed to parse API response: {e}")
+        else:
+            log(f"API returned status {resp.status_code}")
+            
+    except Exception as e:
+        log(f"Error getting listings: {e}")
     
     return listings
 
 
 def send_email(new_listings):
-    # Verify listings exist before sending
-    valid_listings = []
-    for lid in list(new_listings)[:5]:  # Check first 5
-        try:
-            resp = requests.head(f"https://roofz.eu/listing/{lid}", timeout=10, allow_redirects=True)
-            if resp.status_code == 200:
-                valid_listings.append(lid)
-        except:
-            pass
-    
-    if not valid_listings:
-        log("No valid listings found, skipping email")
-        return
-    
-    body = f"{len(valid_listings)} new listing(s) on Roofz.eu!\n\n"
-    for lid in valid_listings:
-        body += f"* https://roofz.eu/listing/{lid}\n\n"
-    body += "View all: https://roofz.eu/availability"
+    try:
+        body = f"{len(new_listings)} new listing(s) on Roofz.eu!\n\n"
+        for lid, info in new_listings.items():
+            title = info.get("title", "New listing")
+            price = info.get("price", "")
+            city = info.get("city", "")
+            body += f"* {title}"
+            if price:
+                body += f" - EUR {price}/mo"
+            if city:
+                body += f" ({city})"
+            body += f"\n  https://roofz.eu/listing/{lid}\n\n"
+        body += "View all: https://roofz.eu/availability"
 
-    resp = requests.post(
-        "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"},
-        json={
-            "from": "Roofz Monitor <onboarding@resend.dev>",
-            "to": os.environ["EMAIL_TO"],
-            "subject": f"Roofz: {len(valid_listings)} New Listing(s)!",
-            "text": body,
-        },
-    )
-    if resp.status_code == 200:
-        log("Email sent!")
-    else:
-        log(f"Email failed: {resp.text}")
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {os.environ['RESEND_API_KEY']}"},
+            json={
+                "from": "Roofz Monitor <onboarding@resend.dev>",
+                "to": os.environ["EMAIL_TO"],
+                "subject": f"Roofz: {len(new_listings)} New Listing(s)!",
+                "text": body,
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            log("Email sent!")
+        else:
+            log(f"Email failed: {resp.text}")
+    except Exception as e:
+        log(f"Email error: {e}")
 
 
 def check_for_new():
@@ -129,43 +116,56 @@ def check_for_new():
     Path("/data").mkdir(exist_ok=True)
     state_path = Path(STATE_FILE)
 
+    if not current_ids:
+        log("No listings found - will retry next cycle")
+        return
+
     log(f"Found {len(current_ids)} listings")
 
     previous_ids = set()
     if state_path.exists():
-        previous_ids = set(json.loads(state_path.read_text()))
+        try:
+            previous_ids = set(json.loads(state_path.read_text()))
+        except:
+            previous_ids = set()
 
     new_ids = current_ids - previous_ids
 
     if new_ids and previous_ids:
-        log(f"Potential new listings: {len(new_ids)}")
-        send_email(new_ids)
+        log(f"NEW LISTINGS: {len(new_ids)}")
+        new_listings = {lid: current[lid] for lid in new_ids}
+        send_email(new_listings)
     elif not previous_ids:
         log(f"First run - tracking {len(current_ids)} listings")
     else:
         log("No new listings")
 
+    # Save current state
     state_path.write_text(json.dumps(list(current_ids)))
 
 
 def main():
-    log(f"Starting Roofz monitor (every {CHECK_INTERVAL}s)")
-    errors = 0
+    log(f"Starting Roofz monitor")
+    log(f"Check interval: {CHECK_INTERVAL}s")
+    log(f"State file: {STATE_FILE}")
     
     while True:
         try:
             check_for_new()
-            errors = 0
         except Exception as e:
-            errors += 1
-            log(f"Error: {e}")
-            if errors >= 3:
-                wait = min(errors * 120, 600)
-                log(f"Backing off {wait}s...")
-                time.sleep(wait)
+            log(f"Error in check cycle: {e}")
         
+        log(f"Sleeping {CHECK_INTERVAL}s...")
         time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        log("Stopped by user")
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        # Sleep before exit so Railway sees the error
+        time.sleep(60)
+        raise
